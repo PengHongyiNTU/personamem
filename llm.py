@@ -1,14 +1,14 @@
 from typing import Optional
-from langchain.chat_models import init_chat_model
-import dotenv 
+from openai import OpenAI 
 
 
-def preprate_llm(
-    model: str = "qwen3",
-    model_provider: str = "openai",
-    base_url: Optional[str] = None,
+
+
+class LLM:  
+
+
+def init_llm(
+    model: str = "qwen-plus",
+    provider: str = "dashscope", 
     api_key: Optional[str] = None,
-    *args, 
-    **kwargs
-): 
-    llm = init_chat_model()
+) 

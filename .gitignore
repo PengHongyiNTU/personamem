@@ -14,4 +14,4 @@ wheels/
 .env
 
 # data files
-/data
+data/
