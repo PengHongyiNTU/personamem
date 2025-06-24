@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "datasets>=3.6.0",
+    "dotenv>=0.9.9",
     "ipykernel>=6.29.5",
     "ipython>=9.3.0",
     "langchain[openai]>=0.3.25",

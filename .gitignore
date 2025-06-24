@@ -12,3 +12,6 @@ wheels/
 
 # dotenv files
 .env
+
+# data files
+/data
