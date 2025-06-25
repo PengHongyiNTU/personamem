@@ -10,5 +10,6 @@ dependencies = [
     "dotenv>=0.9.9",
     "ipykernel>=6.29.5",
     "ipython>=9.3.0",
+    "langchain[openai]>=0.3.26",
     "openai[aiohttp]>=1.91.0",
 ]

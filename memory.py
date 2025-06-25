@@ -16,6 +16,8 @@ class BaseMemoryLoader(ABC):
 
 
 class NaiveMemoryLoader(BaseMemoryLoader):
+    """A naive memory loader that loads contexts from a JSONL file based
+    on context id."""
 
     def __init__(
         self,
