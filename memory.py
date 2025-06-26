@@ -1,9 +1,10 @@
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 from os import PathLike, path
 import pickle
 from functools import lru_cache
 import json
+from collections import defaultdict
 
 
 class BaseMemoryLoader(ABC):
@@ -22,7 +23,7 @@ class NaiveMemoryLoader(BaseMemoryLoader):
     def __init__(
         self,
         jsonl_path: PathLike[str] | str,
-        cached_index_path: PathLike[str] | str | None = None,
+        cached_index_path: Optional[PathLike[str] | str] = None,
         contexts_cache_size: int = 128,
     ) -> None:
         """
@@ -102,10 +103,55 @@ class NaiveMemoryLoader(BaseMemoryLoader):
         return context
 
 
+class PersonaMemoryLoader(BaseMemoryLoader):
+    """
+    A memory loader that loads contexts based on Persona.
+    """
+
+    def __init__(
+        self,
+        jsonl_path: PathLike[str] | str,
+    ) -> None:
+        self.jsonl_path = path.abspath(jsonl_path)
+        self._naive_loader = NaiveMemoryLoader(
+            self.jsonl_path, contexts_cache_size=128
+        )
+
+    def _group_by_persona(self) -> Tuple[dict[str, list[str]], dict[str, str]]:
+        persona_to_ids = defaultdict(list)
+        id_to_persona = {}
+        with open(self.jsonl_path, "r", encoding="utf-8") as f:
+            for line in f.readlines():
+                context = json.loads(line)
+                assert (
+                    len(context) == 1
+                ), "Each line should contain a single context."
+                context_id, messages = next(iter(context.items()))
+                persona = messages[0]["content"]
+                persona_to_ids[persona].append(context_id)
+                id_to_persona[context_id] = persona
+        return persona_to_ids, id_to_persona
+
+
+class PersonaRAGMemoryLoader(BaseMemoryLoader):
+    pass
+
+
+class MemGPTMemoryLoader(BaseMemoryLoader):
+    pass
+
+
+class GraphitiMemoryLoader(BaseMemoryLoader):
+    """Graphiti Memory Loader"""
+
+    pass
+
+
 if __name__ == "__main__":
     # Example usage
     from utils import get_datasets
 
+    # Test NaiveMemoryLoader
     dataset, shared_contexts_path = get_datasets("32k", "data/personamem")
     memory = NaiveMemoryLoader(
         shared_contexts_path, "data/personamem_index_32k.pkl"
@@ -114,3 +160,5 @@ if __name__ == "__main__":
     end_idx = dataset[0]["end_index_in_shared_context"]
     context = memory.get(context_id, end_index=end_idx)
     print(context)
+
+    # Test PersonaMemoryLoader
