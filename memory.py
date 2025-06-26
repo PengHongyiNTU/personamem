@@ -111,11 +111,33 @@ class PersonaMemoryLoader(BaseMemoryLoader):
     def __init__(
         self,
         jsonl_path: PathLike[str] | str,
+        switching_rate: float = 0.3,
+        length_mu: float = 0.5,
+        length_sigma: float = 0.1,
     ) -> None:
+        """
+
+        Initialize the PersonaMemoryLoader.
+        Args:
+            jsonl_path (PathLike[str] | str): Path to the JSONL file containing
+                memory data.
+            switching_rate (float): Probability of switching to a different
+                session under the same persona. Event of switching is modelled
+                by a Poisson distribution.
+            length_mu (float): Mean of the length of the context. The length of
+                the context is modelled by a lognormal distribution.
+            length_sigma (float): Standard deviation of the length of the
+                context.
+
+        """
         self.jsonl_path = path.abspath(jsonl_path)
         self._naive_loader = NaiveMemoryLoader(
             self.jsonl_path, contexts_cache_size=128
         )
+        self.persona_to_ids, self.id_to_persona = self._group_by_persona()
+        self.switching_rate = switching_rate
+        self.length_mu = length_mu
+        self.length_sigma = length_sigma
 
     def _group_by_persona(self) -> Tuple[dict[str, list[str]], dict[str, str]]:
         persona_to_ids = defaultdict(list)
@@ -131,6 +153,9 @@ class PersonaMemoryLoader(BaseMemoryLoader):
                 persona_to_ids[persona].append(context_id)
                 id_to_persona[context_id] = persona
         return persona_to_ids, id_to_persona
+
+    def get(self, query: str, end_index: Optional[int] = None) -> Any:
+        pass
 
 
 class PersonaRAGMemoryLoader(BaseMemoryLoader):
