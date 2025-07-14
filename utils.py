@@ -1,5 +1,5 @@
 import datasets
-from typing import Literal, Tuple
+from typing import Literal, Tuple, Iterable
 import os
 import shutil
 from huggingface_hub import hf_hub_download
@@ -8,6 +8,7 @@ import tiktoken
 from loguru import logger
 from functools import wraps
 import time
+import itertools
 
 
 def get_datasets(
@@ -81,6 +82,12 @@ def timeit(func):
         return result
 
     return wrapper
+
+
+def iter_batches(iterable: Iterable, batch_size: int) -> Iterable:
+    it = iter(iterable)
+    while batch := list(itertools.islice(it, batch_size)):
+        yield batch
 
 
 if __name__ == "__main__":

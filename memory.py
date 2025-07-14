@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 import random
-from typing import Any, Optional, Tuple, List, Callable
+from typing import Any, Optional, Tuple, List, Callable, Iterator
 from os import PathLike, path
 import pickle
 from functools import lru_cache
@@ -10,8 +10,12 @@ import json
 from collections import defaultdict
 from loguru import logger
 import chromadb
-from utils import timeit
+from utils import timeit, iter_batches
 
+
+
+class ChunkType: 
+    
 
 class BaseMemoryLoader(ABC):
     """Abstract base class for memory loaders."""
@@ -136,6 +140,7 @@ class PersonaRAGMemoryLoader(BaseMemoryLoader):
         timestamp_min_gap: int = 10 * 60,
         timestamp_max_gap: int = 3 * 24 * 60 * 60,
         num_thread_workers: int = 8,
+        max_batch_size: int = 10,
     ) -> None:
 
         self.jsonl_path = jsonl_path
@@ -145,6 +150,7 @@ class PersonaRAGMemoryLoader(BaseMemoryLoader):
         self.timestamp_min_gap = timestamp_min_gap
         self.timestamp_max_gap = timestamp_max_gap
         self.num_thread_workers = num_thread_workers
+        self.max_batch_size = max_batch_size
 
         # load all contexts from the jsonl file
         with open(self.jsonl_path, "r", encoding="utf-8") as f:
@@ -188,18 +194,37 @@ class PersonaRAGMemoryLoader(BaseMemoryLoader):
         for context in self.shared_contexts:
             context_id, messages = next(iter(context.items()))
             chunks = self.split_into_chunks_fn(messages)
-            chunks = self._generate_metadata(chunks, context_id)
-            all_chunks.extend(chunks)
+            chunks_with_metadata = self._generate_metadata(chunks, context_id)
+            all_chunks.extend(chunks_with_metadata)
 
         # batch generate embeddings
-        contents = [chunk["content"] for chunk in all_chunks]
+        chunks_with_embeddings = self._batch_embeddings(all_chunks)
         # embeddings = self._batch_embeddings(contents)
+        if chunks_with_embeddings:
+            pass
+
 
     @timeit
     def _batch_embeddings(
-        contents: List[str],
+        self,
+        contents: ,
     ) -> List[List[float]]:
-        pass
+        # Batch generate embeddings for the contents.
+    
+        
+        
+        for batch in self.split_into_batches(contents, self.max_batch_size):
+            with ThreadPoolExecutor(
+                max_workers=self.num_thread_workers
+            ) as executor:
+                embeddings = list(executor.map(self.embedding_fn, batch))
+        
+        
+
+ 
+        
+        
+        
 
     def _generate_metadata(
         self,
