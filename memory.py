@@ -1,10 +1,16 @@
 from abc import ABC, abstractmethod
-from typing import Any, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
+import random
+from typing import Any, Optional, Tuple, List, Callable
 from os import PathLike, path
 import pickle
 from functools import lru_cache
 import json
 from collections import defaultdict
+from loguru import logger
+import chromadb
+from utils import timeit
 
 
 class BaseMemoryLoader(ABC):
@@ -46,18 +52,30 @@ class NaiveMemoryLoader(BaseMemoryLoader):
         # if cached_index_path is not None:
         if self.index_path is not None and path.exists(self.index_path):
             # load the cached index
-            with open(self.index_path, "wb") as f:
-                self.index = pickle.load(f)  # type: ignore
+            logger.info(f"Loading index from {self.index_path}")
+            with open(self.index_path, "rb") as f:
+                self._index = pickle.load(f)  # type: ignore
+            logger.info(f"Index loaded with {len(self._index)} entries.")
         else:
+            logger.info(
+                f"Building index from {self.jsonl_path} as no cached index "
+                "is found."
+            )
             self._index = self._build_index()
+            logger.info(f"Index built with {len(self._index)} entries.")
             if self.index_path:
                 with open(self.index_path, "wb") as f:
                     pickle.dump(self._index, f)
+                logger.info(
+                    f"Index saved to {self.index_path} with "
+                    f"{len(self._index)} entries."
+                )
 
         self._cached_contexts = lru_cache(maxsize=contexts_cache_size)(
             self._load_contexts
         )
 
+    @timeit
     def _build_index(self) -> dict[str, int]:
         """
         Build an index from the JSONL file.
@@ -91,6 +109,7 @@ class NaiveMemoryLoader(BaseMemoryLoader):
         line = self._file_ctx.readline()
         return json.loads(line)[key]
 
+    @timeit
     def get(self, query: str, end_index: Optional[int] = None) -> Any:
         context = self._cached_contexts(query)
         if end_index is not None:
@@ -103,73 +122,106 @@ class NaiveMemoryLoader(BaseMemoryLoader):
         return context
 
 
-class PersonaMemoryLoader(BaseMemoryLoader):
-    """
-    A memory loader that loads contexts based on Persona.
-    """
+class PersonaRAGMemoryLoader(BaseMemoryLoader):
+    """Persona RAG Memory Loader"""
 
     def __init__(
         self,
+        chroma_db_path: PathLike[str] | str,
+        collection_name: str,
         jsonl_path: PathLike[str] | str,
-        switching_rate: float = 0.3,
-        length_mu: float = 0.5,
-        length_sigma: float = 0.1,
+        embedding_fn: Callable,
+        split_into_chunks_fn: Callable,
+        is_by_persona: bool = True,
+        timestamp_min_gap: int = 10 * 60,
+        timestamp_max_gap: int = 3 * 24 * 60 * 60,
+        num_thread_workers: int = 8,
     ) -> None:
-        """
 
-        Initialize the PersonaMemoryLoader.
-        Args:
-            jsonl_path (PathLike[str] | str): Path to the JSONL file containing
-                memory data.
-            switching_rate (float): Probability of switching to a different
-                session under the same persona. Event of switching is modelled
-                by a Poisson distribution.
-            length_mu (float): Mean of the length of the context. The length of
-                the context is modelled by a lognormal distribution.
-            length_sigma (float): Standard deviation of the length of the
-                context.
+        self.jsonl_path = jsonl_path
+        self.embedding_fn = embedding_fn
+        self.split_into_chunks_fn = split_into_chunks_fn
+        self.is_by_persona = is_by_persona
+        self.timestamp_min_gap = timestamp_min_gap
+        self.timestamp_max_gap = timestamp_max_gap
+        self.num_thread_workers = num_thread_workers
 
-        """
-        self.jsonl_path = path.abspath(jsonl_path)
-        self._naive_loader = NaiveMemoryLoader(
-            self.jsonl_path, contexts_cache_size=128
-        )
+        # load all contexts from the jsonl file
+        with open(self.jsonl_path, "r", encoding="utf-8") as f:
+            self.shared_contexts = [json.loads(line) for line in f]
+
+        # get persona to ids mapping and id to persona mapping
         self.persona_to_ids, self.id_to_persona = self._group_by_persona()
-        self.switching_rate = switching_rate
-        self.length_mu = length_mu
-        self.length_sigma = length_sigma
 
-    def _group_by_persona(self) -> Tuple[dict[str, list[str]], dict[str, str]]:
+        chroma_db_path = path.abspath(chroma_db_path)
+        self.chroma_client = chromadb.PersistentClient(path=chroma_db_path)
+        try:
+            self.collection = self.chroma_client.get_collection(
+                collection_name
+            )
+        except ValueError:
+            logger.warning(
+                f"Collection '{collection_name}' not found. "
+                "Creating a new collection."
+            )
+            self.collection = self.chroma_client.create_collection(
+                name=collection_name
+            )
+            self._prepare_collection()
+
+    def _group_by_persona(self) -> Tuple[dict[str, List[str]], dict[str, str]]:
         persona_to_ids = defaultdict(list)
         id_to_persona = {}
-        with open(self.jsonl_path, "r", encoding="utf-8") as f:
-            for line in f.readlines():
-                context = json.loads(line)
-                assert (
-                    len(context) == 1
-                ), "Each line should contain a single context."
-                context_id, messages = next(iter(context.items()))
-                persona = messages[0]["content"]
-                persona_to_ids[persona].append(context_id)
-                id_to_persona[context_id] = persona
-        return persona_to_ids, id_to_persona
+        for context in self.shared_contexts:
+            assert len(context) == 1, (
+                "Expected a single context ID" "in one shared contexts."
+            )
+            context_id, messages = next(iter(context.items()))
+            persona_information = messages[0]["content"]
+            persona_to_ids[persona_information].append(context_id)
+            id_to_persona[context_id] = persona_information
+        return dict(persona_to_ids), id_to_persona
 
-    def get(self, query: str, end_index: Optional[int] = None) -> Any:
+    def _prepare_collection(self) -> None:
+        """Prepare the ChromaDB collection by adding all contexts."""
+        all_chunks = []
+        for context in self.shared_contexts:
+            context_id, messages = next(iter(context.items()))
+            chunks = self.split_into_chunks_fn(messages)
+            chunks = self._generate_metadata(chunks, context_id)
+            all_chunks.extend(chunks)
+
+        # batch generate embeddings
+        contents = [chunk["content"] for chunk in all_chunks]
+        # embeddings = self._batch_embeddings(contents)
+
+    @timeit
+    def _batch_embeddings(
+        contents: List[str],
+    ) -> List[List[float]]:
         pass
 
-
-class PersonaRAGMemoryLoader(BaseMemoryLoader):
-    pass
-
-
-class MemGPTMemoryLoader(BaseMemoryLoader):
-    pass
-
-
-class GraphitiMemoryLoader(BaseMemoryLoader):
-    """Graphiti Memory Loader"""
-
-    pass
+    def _generate_metadata(
+        self,
+        chunks: List[str],
+        context_id: str,
+    ) -> List[dict]:
+        chunks_with_metadata = []
+        start_time = datetime.now() - timedelta(days=365)
+        current_time = start_time
+        for chunk in chunks:
+            chunk = {
+                "content": chunk,
+                "context_id": context_id,
+                "timestamp": current_time.isoformat(),
+                "persona": self.id_to_persona.get(context_id, ""),
+            }
+            gap = random.randint(
+                self.timestamp_min_gap, self.timestamp_max_gap
+            )
+            current_time += timedelta(seconds=gap)
+            chunks_with_metadata.append(chunk)
+        return chunks_with_metadata
 
 
 if __name__ == "__main__":

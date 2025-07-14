@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "aiohttp>=3.12.13",
+    "chromadb>=1.0.13",
     "datasets>=3.6.0",
     "dotenv>=0.9.9",
     "ipykernel>=6.29.5",
@@ -13,4 +14,5 @@ dependencies = [
     "langchain[openai]>=0.3.26",
     "loguru>=0.7.3",
     "openai[aiohttp]>=1.91.0",
+    "tiktoken>=0.9.0",
 ]

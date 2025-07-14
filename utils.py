@@ -4,6 +4,10 @@ import os
 import shutil
 from huggingface_hub import hf_hub_download
 from datasets import Dataset
+import tiktoken
+from loguru import logger
+from functools import wraps
+import time
 
 
 def get_datasets(
@@ -27,6 +31,7 @@ def get_datasets(
 
     # check if the save directory exists, if not create it
     if not os.path.exists(save_dir):
+        logger.info(f"Creating directory: {save_dir}")
         os.makedirs(save_dir)
 
     # Load the PersonaMem dataset
@@ -50,13 +55,32 @@ def get_datasets(
             filename=file_name,
             repo_type="dataset",
         )
-        print(f"Downloaded shared contexts file to {remote_file_path}")
+        logger.info(f"Downloading shared contexts file to {file_path}")
         # move the file to the save directory
         shutil.copy2(remote_file_path, file_path)
-        print(f"Copied to {file_path}")
+        logger.info(f"Shared contexts file saved to {file_path}")
     else:
-        print(f"Shared contexts file already exists at {file_path}")
+        logger.info(f"Shared contexts file already exists at {file_path}")
     return personaMem_32k, file_path
+
+
+def count_tokens(text: str, model_name: str = "gpt-4") -> int:
+    """Count the number of tokens in a text string."""
+    encoding = tiktoken.encoding_for_model(model_name)
+    return len(encoding.encode(text))
+
+
+def timeit(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        start = time.perf_counter()
+        result = func(*args, **kwargs)
+        end = time.perf_counter()
+        elapsed = end - start
+        logger.info(f"Function {func.__qualname__} took {elapsed:.4f} seconds")
+        return result
+
+    return wrapper
 
 
 if __name__ == "__main__":

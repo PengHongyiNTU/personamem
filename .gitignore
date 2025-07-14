@@ -15,3 +15,7 @@ wheels/
 
 # data files
 data/
+
+# chroma database 
+# dir ends with chroma_db
+*chroma_db/
