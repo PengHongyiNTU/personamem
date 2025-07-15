@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 import random
-from typing import Any, Optional, Tuple, List, Callable, Iterator
+from typing import Any, Optional, Tuple, List, Callable, TypedDict, NotRequired
 from os import PathLike, path
 import pickle
 from functools import lru_cache
@@ -10,12 +10,18 @@ import json
 from collections import defaultdict
 from loguru import logger
 import chromadb
+from openai import base_url
 from utils import timeit, iter_batches
+from tqdm import tqdm
 
+class ChunkType(TypedDict):
+    id: str
+    context_id: str
+    content: str
+    timestamp: str
+    persona: str
+    embedding: NotRequired[List[float]]  # Optional, can be added later
 
-
-class ChunkType: 
-    
 
 class BaseMemoryLoader(ABC):
     """Abstract base class for memory loaders."""
@@ -190,12 +196,12 @@ class PersonaRAGMemoryLoader(BaseMemoryLoader):
 
     def _prepare_collection(self) -> None:
         """Prepare the ChromaDB collection by adding all contexts."""
-        all_chunks = []
+        all_chunks: List[ChunkType] = []
         for context in self.shared_contexts:
             context_id, messages = next(iter(context.items()))
-            chunks = self.split_into_chunks_fn(messages)
-            chunks_with_metadata = self._generate_metadata(chunks, context_id)
-            all_chunks.extend(chunks_with_metadata)
+            raw_chunks = self.split_into_chunks_fn(messages)
+            chunks = self._generate_metadata(raw_chunks, context_id)
+            all_chunks.extend(chunks)
 
         # batch generate embeddings
         chunks_with_embeddings = self._batch_embeddings(all_chunks)
@@ -203,40 +209,45 @@ class PersonaRAGMemoryLoader(BaseMemoryLoader):
         if chunks_with_embeddings:
             pass
 
-
     @timeit
     def _batch_embeddings(
         self,
-        contents: ,
-    ) -> List[List[float]]:
-        # Batch generate embeddings for the contents.
-    
+        chunks: List[ChunkType],
+    ) -> List[ChunkType]:
+        max_batch_size = self.max_batch_size
+        num_thread_workers = self.num_thread_workers
         
         
-        for batch in self.split_into_batches(contents, self.max_batch_size):
-            with ThreadPoolExecutor(
-                max_workers=self.num_thread_workers
-            ) as executor:
-                embeddings = list(executor.map(self.embedding_fn, batch))
-        
-        
+        def get_embeeddings_for_batch(batch_texts: List[str]) -> List[List[float]]:
+            return self.embedding_fn(
+                batch_texts, 
+                model="text-embedding-v4",
+                dimensions=1024,
+                base_url=self.
+            )
 
- 
-        
-        
-        
+        for batch in iter_batches(chunks, max_batch_size):
+            with ThreadPoolExecutor(
+                max_workers=num_thread_workers
+            ) as executor:
+                results = list(tqdm(
+                    executor.map(
+                        get_
+                    )
+                ))
 
     def _generate_metadata(
         self,
-        chunks: List[str],
+        raw_chunks: List[str],
         context_id: str,
-    ) -> List[dict]:
-        chunks_with_metadata = []
+    ) -> List[ChunkType]:
+        chunks = []
         start_time = datetime.now() - timedelta(days=365)
         current_time = start_time
-        for chunk in chunks:
-            chunk = {
-                "content": chunk,
+        for i, raw_chunk in enumerate(raw_chunks):
+            chunk: ChunkType = {
+                "id": str(i),
+                "content": raw_chunk,
                 "context_id": context_id,
                 "timestamp": current_time.isoformat(),
                 "persona": self.id_to_persona.get(context_id, ""),
@@ -245,8 +256,8 @@ class PersonaRAGMemoryLoader(BaseMemoryLoader):
                 self.timestamp_min_gap, self.timestamp_max_gap
             )
             current_time += timedelta(seconds=gap)
-            chunks_with_metadata.append(chunk)
-        return chunks_with_metadata
+            chunks.append(chunk)
+        return chunks
 
 
 if __name__ == "__main__":

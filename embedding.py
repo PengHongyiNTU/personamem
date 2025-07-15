@@ -32,16 +32,38 @@ def embedding_fns(
                 "at a time."
             )
 
-    if "dashcope" in base_url:
+    if "dashscope" in base_url:
         api_key = os.getenv("DASHSCOPE_API_KEY")
     elif "openai" in base_url:
         api_key = os.getenv("OPENAI_API_KEY")
     else:
         raise ValueError("Unsupported base URL. Use 'dashscope' or 'openai'.")
     if not api_key:
+        print("No API key found in environment variables.")
         api_key = getpass.getpass("Please enter your API key: ")
     client = OpenAI(base_url=base_url, api_key=api_key)
     response = client.embeddings.create(
         input=texts, model=model, dimensions=dimensions
     )
-    return [embedding["embedding"] for embedding in response["data"]]
+    print(response.usage)
+    return [data.embedding for data in response.data]
+
+
+if __name__ == "__main__":
+    # Example usage
+    from utils import timeit
+    from dotenv import load_dotenv
+
+    load_dotenv()
+
+    @timeit
+    def example_usage():
+        texts = [
+            "欲把西湖比西子",
+            "淡妆浓抹总相宜",
+        ]
+        embeddings = embedding_fns(texts)
+        return embeddings
+
+    embeddings = example_usage()
+    print(embeddings)
