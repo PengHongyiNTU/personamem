@@ -1,8 +1,17 @@
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
-import random
-from typing import Any, Optional, Tuple, List, Callable, TypedDict, NotRequired
+import math
+from typing import (
+    Any,
+    Literal,
+    Optional,
+    Tuple,
+    List,
+    Callable,
+    TypedDict,
+    NotRequired,
+)
 from os import PathLike, path
 import pickle
 from functools import lru_cache
@@ -10,9 +19,11 @@ import json
 from collections import defaultdict
 from loguru import logger
 import chromadb
-from openai import base_url
+from embedding import EmbeddingModel
 from utils import timeit, iter_batches
 from tqdm import tqdm
+import random
+
 
 class ChunkType(TypedDict):
     id: str
@@ -20,7 +31,8 @@ class ChunkType(TypedDict):
     content: str
     timestamp: str
     persona: str
-    embedding: NotRequired[List[float]]  # Optional, can be added later
+    embedding: List[float]
+    distance: NotRequired[List[float]]
 
 
 class BaseMemoryLoader(ABC):
@@ -120,8 +132,8 @@ class NaiveMemoryLoader(BaseMemoryLoader):
         return json.loads(line)[key]
 
     @timeit
-    def get(self, query: str, end_index: Optional[int] = None) -> Any:
-        context = self._cached_contexts(query)
+    def get(self, context_id: str, end_index: Optional[int] = None) -> Any:
+        context = self._cached_contexts(context_id)
         if end_index is not None:
             if end_index > len(context):
                 raise ValueError(
@@ -140,7 +152,7 @@ class PersonaRAGMemoryLoader(BaseMemoryLoader):
         chroma_db_path: PathLike[str] | str,
         collection_name: str,
         jsonl_path: PathLike[str] | str,
-        embedding_fn: Callable,
+        embedding_model: EmbeddingModel,
         split_into_chunks_fn: Callable,
         is_by_persona: bool = True,
         timestamp_min_gap: int = 10 * 60,
@@ -150,7 +162,7 @@ class PersonaRAGMemoryLoader(BaseMemoryLoader):
     ) -> None:
 
         self.jsonl_path = jsonl_path
-        self.embedding_fn = embedding_fn
+        self.embedding_model = embedding_model
         self.split_into_chunks_fn = split_into_chunks_fn
         self.is_by_persona = is_by_persona
         self.timestamp_min_gap = timestamp_min_gap
@@ -177,7 +189,7 @@ class PersonaRAGMemoryLoader(BaseMemoryLoader):
                 "Creating a new collection."
             )
             self.collection = self.chroma_client.create_collection(
-                name=collection_name
+                name=collection_name,
             )
             self._prepare_collection()
 
@@ -205,36 +217,64 @@ class PersonaRAGMemoryLoader(BaseMemoryLoader):
 
         # batch generate embeddings
         chunks_with_embeddings = self._batch_embeddings(all_chunks)
-        # embeddings = self._batch_embeddings(contents)
         if chunks_with_embeddings:
-            pass
+            ids = []
+            embeddings = []
+            metadata = []
+            for chunk in chunks_with_embeddings:
+                ids.append(chunk["id"])
+                embeddings.append(chunk["embedding"])
+                metadata.append(
+                    {
+                        "context_id": chunk["context_id"],
+                        "timestamp": chunk["timestamp"],
+                        "persona": chunk["persona"],
+                    }
+                )
+            self.collection.add(
+                ids=ids,
+                embeddings=embeddings,
+                metadatas=metadata,
+            )
+            logger.info("Database collection created")
+        else:
+            logger.warning(
+                "No chunks with embeddings to add to the collection."
+            )
 
     @timeit
     def _batch_embeddings(
         self,
         chunks: List[ChunkType],
     ) -> List[ChunkType]:
-        max_batch_size = self.max_batch_size
-        num_thread_workers = self.num_thread_workers
-        
-        
-        def get_embeeddings_for_batch(batch_texts: List[str]) -> List[List[float]]:
-            return self.embedding_fn(
-                batch_texts, 
-                model="text-embedding-v4",
-                dimensions=1024,
-                base_url=self.
+        contents = [chunk["content"] for chunk in chunks]
+        batch_iter = iter_batches(contents, self.max_batch_size)
+        num_batches = math.ceil(len(contents) / self.max_batch_size)
+        all_embeddings = []
+        token_usage = 0
+        with ThreadPoolExecutor(
+            max_workers=self.num_thread_workers
+        ) as executor:
+            results = list(
+                tqdm(
+                    executor.map(self.embedding_model, batch_iter),
+                    total=num_batches,
+                    desc="Generating embeddings",
+                    unit="batch",
+                )
             )
+        for result in results:
+            all_embedding = [embedding.embedding for embedding in result.data]
+            token_usage += result.usage.total_tokens
+            all_embeddings.extend(all_embedding)
+        for i, chunk in enumerate(chunks):
+            chunk["embedding"] = all_embeddings[i]
+        logger.info(
+            f"Generated {len(all_embeddings)} embeddings with "
+            f"{token_usage} total tokens used."
+        )
 
-        for batch in iter_batches(chunks, max_batch_size):
-            with ThreadPoolExecutor(
-                max_workers=num_thread_workers
-            ) as executor:
-                results = list(tqdm(
-                    executor.map(
-                        get_
-                    )
-                ))
+        return chunks
 
     def _generate_metadata(
         self,
@@ -248,6 +288,7 @@ class PersonaRAGMemoryLoader(BaseMemoryLoader):
             chunk: ChunkType = {
                 "id": str(i),
                 "content": raw_chunk,
+                "embedding": [],
                 "context_id": context_id,
                 "timestamp": current_time.isoformat(),
                 "persona": self.id_to_persona.get(context_id, ""),
@@ -258,6 +299,37 @@ class PersonaRAGMemoryLoader(BaseMemoryLoader):
             current_time += timedelta(seconds=gap)
             chunks.append(chunk)
         return chunks
+
+    @timeit
+    def get(
+        self,
+        context_id: str,
+        query: str,
+        top_k: int = 5,
+        sort_by: Literal["similarity", "timestamp"] = "timestamp",
+        filter_by: Literal["persona", "context_id"] = "context_id",
+    ) -> Any:
+        query_embedding = self.embedding_model([query]).data[0].embedding
+        if filter_by == "context_id":
+            where = {"context_id": context_id}
+        elif filter_by == "persona":
+            persona = self.id_to_persona.get(context_id, "")
+            context_ids = self.persona_to_ids.get(persona, [])
+            if not context_ids:
+                logger.warning(
+                    f"No contexts found for persona '{persona}' "
+                    "associated with context_id '{context_id}'."
+                )
+            else:
+                where = {"context_id": {"$in": context_ids}}
+        results = self.collection.query(
+            query_embeddings=[query_embedding],
+            n_results=top_k,
+            where=where,  # type: ignore[arg-type]
+        )
+        # parsed to chunk and sort 
+        chunks: List[ChunkType] = []
+
 
 
 if __name__ == "__main__":
@@ -272,6 +344,6 @@ if __name__ == "__main__":
     context_id = dataset[0]["shared_context_id"]
     end_idx = dataset[0]["end_index_in_shared_context"]
     context = memory.get(context_id, end_index=end_idx)
-    print(context)
+    print(type(context))
 
     # Test PersonaMemoryLoader
