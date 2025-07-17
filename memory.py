@@ -10,7 +10,6 @@ from typing import (
     List,
     Callable,
     TypedDict,
-    NotRequired,
 )
 from os import PathLike, path
 import pickle
@@ -32,15 +31,19 @@ class ChunkType(TypedDict):
     timestamp: str
     persona: str
     embedding: List[float]
-    distance: NotRequired[List[float]]
 
 
 class BaseMemoryLoader(ABC):
     """Abstract base class for memory loaders."""
 
     @abstractmethod
-    def get(self, query: str, *args, **kwargs) -> Any:
+    def get(self, query: str, *args, **kwargs) -> str:
         """Retrieve information based on the query."""
+        pass
+
+    @abstractmethod
+    def serialize_context(self, context: Any) -> str:
+        """Serialize the context to pure text format."""
         pass
 
 
@@ -133,15 +136,23 @@ class NaiveMemoryLoader(BaseMemoryLoader):
 
     @timeit
     def get(self, context_id: str, end_index: Optional[int] = None) -> Any:
-        context = self._cached_contexts(context_id)
+        messages = self._cached_contexts(context_id)
         if end_index is not None:
             if end_index > len(context):
                 raise ValueError(
                     f"end_index {end_index} is greater than "
                     f"the length of context {len(context)}"
                 )
-            context = context[:end_index]
-        return context
+            messages = messages[:end_index]
+        return self.serialize_context(messages)
+
+    def serialize_context(self, messages: List[dict]) -> str:
+        lines = []
+        for msg in messages:
+            role = msg["role"].strip().upper()
+            content = msg["content"].replace("\n", " ").strip()
+            lines.append(f"{role}: {content}")
+        return "\n".join(lines)
 
 
 class PersonaRAGMemoryLoader(BaseMemoryLoader):
@@ -306,10 +317,13 @@ class PersonaRAGMemoryLoader(BaseMemoryLoader):
         context_id: str,
         query: str,
         top_k: int = 5,
-        sort_by: Literal["similarity", "timestamp"] = "timestamp",
         filter_by: Literal["persona", "context_id"] = "context_id",
     ) -> Any:
-        query_embedding = self.embedding_model([query]).data[0].embedding
+        if isinstance(query, list):
+            raise ValueError("Currenly only single query is supported.")
+        response = self.embedding_model([query])
+        query_embedding = response.data[0].embedding
+
         if filter_by == "context_id":
             where = {"context_id": context_id}
         elif filter_by == "persona":
@@ -323,13 +337,23 @@ class PersonaRAGMemoryLoader(BaseMemoryLoader):
             else:
                 where = {"context_id": {"$in": context_ids}}
         results = self.collection.query(
-            query_embeddings=[query_embedding],
+            query_embeddings=query_embedding,
             n_results=top_k,
             where=where,  # type: ignore[arg-type]
+            include=[
+                "documents",
+                "metadatas",
+            ],
         )
-        # parsed to chunk and sort 
-        chunks: List[ChunkType] = []
-
+        # parsed to chunk
+        if not results["documents"] or not results["metadatas"]:
+            logger.warning(
+                f"No results found for context_id '{context_id}' "
+                "and query '{query}'."
+            )
+            return []
+        else:
+            pass
 
 
 if __name__ == "__main__":

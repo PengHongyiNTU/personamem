@@ -35,7 +35,9 @@ class EmbeddingModel:
 
         self.client = OpenAI(base_url=self.base_url, api_key=self.api_key)
 
-    def __call__(self, texts: List[str]) -> CreateEmbeddingResponse:
+    def __call__(
+        self, texts: List[str], raw_response: bool = True
+    ) -> CreateEmbeddingResponse:
         if len(texts) > self.max_len_per_query:
             raise ValueError(
                 f"The model {self.model} can only process up to "
